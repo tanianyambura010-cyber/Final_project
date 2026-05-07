@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+build/
+coverage/
+logs/
+*.log
+
+# Local document extraction artifacts
+_compiled_report2_text.txt
+_compiled_report2_media/
+

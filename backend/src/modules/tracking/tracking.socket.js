@@ -31,7 +31,7 @@ async function authenticateSocket(socket, next) {
 
     socket.user = user;
     next();
-  } catch (_error) {
+  } catch {
     next(new Error('Invalid or expired token.'));
   }
 }

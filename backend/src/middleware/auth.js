@@ -16,7 +16,7 @@ export const requireAuth = asyncHandler(async (req, _res, next) => {
 
   try {
     payload = jwt.verify(token, env.jwt.secret);
-  } catch (_error) {
+  } catch {
     throw unauthorized('Invalid or expired token.');
   }
 
@@ -47,4 +47,3 @@ export function requireRole(...roles) {
     return next();
   };
 }
-

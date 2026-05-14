@@ -64,7 +64,7 @@ export const register = asyncHandler(async (req, res) => {
 });
 
 export const login = asyncHandler(async (req, res) => {
-  const { email, password } = req.validated.body;
+  const { email, password, role } = req.validated.body;
   const users = await query(
     `SELECT id, name, email, phone, password_hash, role, is_active
      FROM users
@@ -82,6 +82,10 @@ export const login = asyncHandler(async (req, res) => {
 
   if (!valid) {
     throw unauthorized('Invalid email or password.');
+  }
+
+  if (role && user.role !== role) {
+    throw unauthorized('Invalid credentials for the selected role.');
   }
 
   const token = signAccessToken(user);

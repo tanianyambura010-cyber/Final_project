@@ -16,16 +16,17 @@ const io = new SocketServer(server, {
   }
 });
 
+app.set('io', io);
 registerTrackingSocket(io);
 
 try {
   await connectRedis();
 
   server.listen(env.port, () => {
-    console.log(`Cafe Direct API listening on http://localhost:${env.port}`);
+    console.log(`Bean & Dash API listening on http://localhost:${env.port}`);
   });
 } catch (error) {
-  console.error('Failed to start Cafe Direct API:', error.message);
+  console.error('Failed to start Bean & Dash API:', error.message);
   process.exit(1);
 }
 

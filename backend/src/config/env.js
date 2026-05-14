@@ -27,7 +27,14 @@ export const env = {
   nodeEnv: read('NODE_ENV', 'development'),
   port: readNumber('PORT', 4000),
   corsOrigin: readList('CORS_ORIGIN', 'http://localhost:8081,http://localhost:19006,http://localhost:3000'),
-  deliveryFee: readNumber('DELIVERY_FEE', 150),
+  deliveryFirstKmFee: readNumber('DELIVERY_FIRST_KM_FEE', 50),
+  deliveryFeePerKm: readNumber('DELIVERY_FEE_PER_KM', 50),
+  deliveryIncludedKm: readNumber('DELIVERY_INCLUDED_KM', 1),
+  restaurant: {
+    name: read('RESTAURANT_NAME', 'Senate Hotel Juja'),
+    latitude: readNumber('RESTAURANT_LATITUDE', -1.1059),
+    longitude: readNumber('RESTAURANT_LONGITUDE', 37.01564)
+  },
   allowAdminBootstrap: readBoolean('ALLOW_ADMIN_BOOTSTRAP', true),
   trackingLocationTtlSeconds: readNumber('TRACKING_LOCATION_TTL_SECONDS', 3600),
   jwt: {

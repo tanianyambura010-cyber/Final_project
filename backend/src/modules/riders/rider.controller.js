@@ -2,6 +2,7 @@ import { query, transaction } from '../../config/db.js';
 import { ROLES } from '../../constants/roles.js';
 import { asyncHandler } from '../../utils/async-handler.js';
 import { badRequest, forbidden, notFound } from '../../utils/http-error.js';
+import { hashPassword } from '../../utils/passwords.js';
 
 function mapRider(row) {
   return {
@@ -30,7 +31,45 @@ export const listRiders = asyncHandler(async (_req, res) => {
 });
 
 export const createRiderProfile = asyncHandler(async (req, res) => {
-  const { userId, vehicleType, plateNumber = null } = req.validated.body;
+  const { userId, name, email, phone, password, vehicleType, plateNumber = null } = req.validated.body;
+
+  if (!userId) {
+    const existing = await query('SELECT id FROM users WHERE email = :email LIMIT 1', { email });
+
+    if (existing[0]) {
+      throw badRequest('Email is already registered.');
+    }
+
+    const passwordHash = await hashPassword(password);
+    const riderId = await transaction(async (connection) => {
+      const [userResult] = await connection.execute(
+        `INSERT INTO users (name, email, phone, password_hash, role)
+         VALUES (:name, :email, :phone, :passwordHash, :role)`,
+        { name, email, phone, passwordHash, role: ROLES.RIDER }
+      );
+
+      const [result] = await connection.execute(
+        `INSERT INTO rider_profiles (user_id, vehicle_type, plate_number)
+         VALUES (:userId, :vehicleType, :plateNumber)`,
+        { userId: userResult.insertId, vehicleType, plateNumber }
+      );
+
+      return result.insertId;
+    });
+
+    const rows = await query(
+      `SELECT rp.*, u.name, u.email, u.phone
+       FROM rider_profiles rp
+       JOIN users u ON u.id = rp.user_id
+       WHERE rp.id = :riderId
+       LIMIT 1`,
+      { riderId }
+    );
+
+    res.status(201).json({ rider: mapRider(rows[0]) });
+    return;
+  }
+
   const users = await query('SELECT id, role FROM users WHERE id = :userId LIMIT 1', { userId });
   const user = users[0];
 

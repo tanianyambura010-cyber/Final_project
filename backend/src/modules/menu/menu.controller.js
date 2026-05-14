@@ -70,6 +70,19 @@ export const createMenuItem = asyncHandler(async (req, res) => {
   res.status(201).json({ item: mapMenuItem(rows[0]) });
 });
 
+export const uploadMenuImage = asyncHandler(async (req, res) => {
+  if (!req.file) {
+    throw badRequest('Choose an image file to upload.');
+  }
+
+  const imageUrl = `${req.protocol}://${req.get('host')}/uploads/menu/${req.file.filename}`;
+
+  res.status(201).json({
+    imageUrl,
+    filename: req.file.filename
+  });
+});
+
 export const updateMenuItem = asyncHandler(async (req, res) => {
   const { id } = req.validated.params;
   const body = req.validated.body;

@@ -64,6 +64,19 @@ export function registerTrackingSocket(io) {
   io.use(authenticateSocket);
 
   io.on('connection', (socket) => {
+    // Put each user type into the room that receives its notifications.
+    if (STAFF_ROLES.includes(socket.user.role)) {
+      socket.join('staff:active-orders');
+    }
+
+    if (socket.user.role === ROLES.RIDER) {
+      socket.join(`rider:${socket.user.id}`);
+    }
+
+    if (socket.user.role === ROLES.CUSTOMER) {
+      socket.join(`customer:${socket.user.id}`);
+    }
+
     socket.on('order:track', async ({ orderId }, callback) => {
       try {
         const order = await getOrder(orderId);
@@ -108,7 +121,8 @@ export function registerTrackingSocket(io) {
           speed: payload.speed == null ? null : Number(payload.speed)
         };
 
-        const recordedLocation = await setLatestLocation(payload.orderId, location);
+        // Save the latest location for quick tracking lookup.
+        await setLatestLocation(payload.orderId, location);
 
         await query(
           `INSERT INTO rider_locations (rider_id, order_id, latitude, longitude, heading, speed)
@@ -118,7 +132,17 @@ export function registerTrackingSocket(io) {
           location
         );
 
-        io.to(`order:${payload.orderId}`).emit('rider:location', recordedLocation);
+        // Read back the saved row so every tracker receives the same format.
+        const rows = await query(
+          `SELECT rider_id, order_id, latitude, longitude, heading, speed, recorded_at
+           FROM rider_locations
+           WHERE order_id = :orderId
+           ORDER BY recorded_at DESC
+           LIMIT 1`,
+          { orderId: location.orderId }
+        );
+
+        io.to(`order:${payload.orderId}`).emit('rider:location', rows[0]);
         callback?.({ ok: true });
       } catch (error) {
         callback?.({ ok: false, message: error.message });
@@ -132,6 +156,16 @@ export function registerTrackingSocket(io) {
       }
 
       socket.join('staff:active-orders');
+      callback?.({ ok: true });
+    });
+
+    socket.on('rider:watch-orders', (_payload, callback) => {
+      if (socket.user.role !== ROLES.RIDER) {
+        callback?.({ ok: false, message: 'Rider access is required.' });
+        return;
+      }
+
+      socket.join(`rider:${socket.user.id}`);
       callback?.({ ok: true });
     });
   });

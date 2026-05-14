@@ -4,6 +4,13 @@ import { getStripe } from '../../config/stripe.js';
 import { ROLES, STAFF_ROLES } from '../../constants/roles.js';
 import { asyncHandler } from '../../utils/async-handler.js';
 import { badRequest, forbidden, notFound } from '../../utils/http-error.js';
+import {
+  createOrderNotification,
+  emitCustomerOrderNotification,
+  emitRiderOrderNotification,
+  emitStaffOrderNotification,
+  emitTrackedOrderNotification
+} from '../orders/order-events.js';
 
 async function getOrder(orderId) {
   const rows = await query(
@@ -45,6 +52,24 @@ function serializePayment(row) {
   };
 }
 
+function createDemoPaymentDetails(order, user, reference) {
+  const orderSuffix = String(order.id).padStart(4, '0').slice(-4);
+  const approvalSeed = Date.now().toString(36).toUpperCase().slice(-6);
+
+  // Fake card details are used only for project demonstration.
+  return {
+    reference,
+    cardBrand: 'Visa',
+    maskedCardNumber: `4242 4242 4242 ${orderSuffix}`,
+    expiry: '12/30',
+    cardholder: user.name,
+    approvalCode: `CF-${approvalSeed}-${orderSuffix}`,
+    amount: order.total_amount,
+    currency: env.stripe.currency.toUpperCase(),
+    status: 'accepted'
+  };
+}
+
 async function getLatestPayment(orderId) {
   const rows = await query('SELECT * FROM payments WHERE order_id = :orderId ORDER BY id DESC LIMIT 1', { orderId });
   return rows[0] ?? null;
@@ -64,8 +89,7 @@ async function markPaymentPaidByIntent(paymentIntent) {
     await connection.execute(
       `UPDATE orders o
        JOIN payments p ON p.order_id = o.id
-       SET o.payment_status = 'paid',
-           o.status = CASE WHEN o.status = 'created' THEN 'confirmed' ELSE o.status END
+       SET o.payment_status = 'paid'
        WHERE p.provider_reference = :paymentIntentId`,
       { paymentIntentId: paymentIntent.id }
     );
@@ -207,6 +231,76 @@ export const syncStripePayment = asyncHandler(async (req, res) => {
   res.json({
     payment: serializePayment(await getLatestPayment(orderId)),
     stripeStatus: paymentIntent.status
+  });
+});
+
+export const confirmDemoPayment = asyncHandler(async (req, res) => {
+  const { orderId } = req.validated.params;
+  const order = await getOrder(orderId);
+
+  if (!order) {
+    throw notFound('Order was not found.');
+  }
+
+  if (!canManagePayment(req.user, order)) {
+    throw forbidden();
+  }
+
+  const payment = await getLatestPayment(orderId);
+
+  if (!payment) {
+    throw badRequest('Payment record was not found for this order.');
+  }
+
+  // Reuse the demo reference if the same order is confirmed again.
+  const reference = payment.provider_reference?.startsWith('demo_')
+    ? payment.provider_reference
+    : `demo_${order.id}_${Date.now()}`;
+  const demoPayment = createDemoPaymentDetails(order, req.user, reference);
+
+  if (payment.status !== 'paid' || order.payment_status !== 'paid') {
+    // Mark both payment and order as paid in one transaction.
+    await transaction(async (connection) => {
+      await connection.execute(
+        `UPDATE payments
+         SET status = 'paid',
+             provider_reference = :reference,
+             provider_client_secret = :approvalCode,
+             paid_at = CURRENT_TIMESTAMP
+         WHERE id = :paymentId`,
+        {
+          paymentId: payment.id,
+          reference,
+          approvalCode: demoPayment.approvalCode
+        }
+      );
+
+      await connection.execute(
+        `UPDATE orders
+         SET payment_status = 'paid'
+         WHERE id = :orderId`,
+        { orderId }
+      );
+    });
+  }
+
+  const updatedOrder = await getOrder(orderId);
+  const notification = createOrderNotification(
+    'payment_confirmed',
+    updatedOrder,
+    `Payment accepted for order #${updatedOrder.id}.`
+  );
+
+  emitStaffOrderNotification(req, notification);
+  emitCustomerOrderNotification(req, updatedOrder.customer_id, notification);
+  emitRiderOrderNotification(req, updatedOrder.rider_user_id, notification);
+  emitTrackedOrderNotification(req, updatedOrder.id, notification);
+
+  res.json({
+    payment: serializePayment(await getLatestPayment(orderId)),
+    demoPayment,
+    orderStatus: updatedOrder.status,
+    paymentStatus: 'paid'
   });
 });
 

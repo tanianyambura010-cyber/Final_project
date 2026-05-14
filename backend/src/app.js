@@ -2,6 +2,7 @@ import cors from 'cors';
 import express from 'express';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import { fileURLToPath, URL } from 'node:url';
 
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -19,6 +20,7 @@ import { userRoutes } from './modules/users/user.routes.js';
 
 export function createApp() {
   const app = express();
+  const uploadsPath = fileURLToPath(new URL('../uploads/', import.meta.url));
 
   app.use(helmet());
   app.use(
@@ -36,11 +38,20 @@ export function createApp() {
   );
   app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
   app.post('/api/v1/payments/stripe/webhook', express.raw({ type: 'application/json' }), handleStripeWebhook);
+  app.use(
+    '/uploads',
+    (_req, res, next) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      next();
+    },
+    express.static(uploadsPath)
+  );
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/', (_req, res) => {
     res.json({
-      name: 'Cafe Direct API',
+      name: 'Bean & Dash API',
       version: '0.1.0',
       docs: '/api/v1/health'
     });

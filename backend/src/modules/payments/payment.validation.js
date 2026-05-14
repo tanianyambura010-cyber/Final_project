@@ -9,3 +9,5 @@ export const orderPaymentSchema = z.object({
 export const stripeIntentSchema = orderPaymentSchema;
 
 export const syncStripePaymentSchema = orderPaymentSchema;
+
+export const demoPaymentSchema = orderPaymentSchema;

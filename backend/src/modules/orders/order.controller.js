@@ -5,6 +5,58 @@ import { ROLES, STAFF_ROLES } from '../../constants/roles.js';
 import { asyncHandler } from '../../utils/async-handler.js';
 import { badRequest, forbidden, notFound } from '../../utils/http-error.js';
 import { canReadOrder } from './order-access.js';
+import {
+  createOrderNotification,
+  emitCustomerOrderNotification,
+  emitRiderOrderNotification,
+  emitStaffOrderNotification,
+  emitTrackedOrderNotification
+} from './order-events.js';
+
+const ORDER_STATUS_LABELS = {
+  created: 'pending',
+  confirmed: 'accepted',
+  preparing: 'preparing',
+  ready_for_delivery: 'ready for delivery',
+  out_for_delivery: 'out for delivery',
+  delivered: 'delivered',
+  completed: 'completed',
+  cancelled: 'cancelled'
+};
+
+function orderStatusLabel(status) {
+  return ORDER_STATUS_LABELS[status] ?? status.replace(/_/g, ' ');
+}
+
+function degreesToRadians(value) {
+  return (value * Math.PI) / 180;
+}
+
+function distanceInKm(fromLatitude, fromLongitude, toLatitude, toLongitude) {
+  const earthRadiusKm = 6371;
+  const latitudeDelta = degreesToRadians(toLatitude - fromLatitude);
+  const longitudeDelta = degreesToRadians(toLongitude - fromLongitude);
+  const startLatitude = degreesToRadians(fromLatitude);
+  const endLatitude = degreesToRadians(toLatitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(startLatitude) * Math.cos(endLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+
+  return 2 * earthRadiusKm * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function calculateDeliveryFee(deliveryLatitude, deliveryLongitude) {
+  // Work out delivery cost from the restaurant to the customer GPS point.
+  const distanceKm = distanceInKm(
+    env.restaurant.latitude,
+    env.restaurant.longitude,
+    Number(deliveryLatitude),
+    Number(deliveryLongitude)
+  );
+  const billableDistanceKm = Math.max(distanceKm - env.deliveryIncludedKm, 0);
+
+  return Math.round(env.deliveryFirstKmFee + billableDistanceKm * env.deliveryFeePerKm);
+}
 
 function mapOrder(row) {
   return {
@@ -44,6 +96,7 @@ async function findOrderById(id) {
     `SELECT o.*,
             c.name AS customer_name,
             rp.user_id AS rider_user_id,
+            rp.current_status AS rider_current_status,
             ru.name AS rider_name
      FROM orders o
      JOIN users c ON c.id = o.customer_id
@@ -107,9 +160,10 @@ export const createOrder = asyncHandler(async (req, res) => {
     const menuItem = menuById.get(Number(item.menuItemId));
     return sum + Number(menuItem.price) * item.quantity;
   }, 0);
-  const deliveryFee = env.deliveryFee;
+  const deliveryFee = calculateDeliveryFee(deliveryLatitude, deliveryLongitude);
   const totalAmount = subtotal + deliveryFee;
 
+  // Save the order, its items, and its payment record together.
   const orderId = await transaction(async (connection) => {
     const [orderResult] = await connection.execute(
       `INSERT INTO orders (
@@ -172,6 +226,11 @@ export const createOrder = asyncHandler(async (req, res) => {
     order: mapOrder(order),
     items: orderItems.map(mapOrderItem)
   });
+
+  emitStaffOrderNotification(
+    req,
+    createOrderNotification('order_created', order, `New order #${order.id} has been created.`)
+  );
 });
 
 export const listOrders = asyncHandler(async (req, res) => {
@@ -198,6 +257,7 @@ export const listOrders = asyncHandler(async (req, res) => {
     `SELECT o.*,
             c.name AS customer_name,
             rp.user_id AS rider_user_id,
+            rp.current_status AS rider_current_status,
             ru.name AS rider_name
      FROM orders o
      JOIN users c ON c.id = o.customer_id
@@ -232,7 +292,7 @@ export const getOrder = asyncHandler(async (req, res) => {
 
 export const updateOrderStatus = asyncHandler(async (req, res) => {
   const { id } = req.validated.params;
-  const { status: nextStatus } = req.validated.body;
+  const { status: requestedStatus } = req.validated.body;
   const order = await findOrderById(id);
 
   if (!order) {
@@ -248,20 +308,49 @@ export const updateOrderStatus = asyncHandler(async (req, res) => {
   }
 
   const allowed = ALLOWED_ORDER_TRANSITIONS[order.status] ?? [];
+  const riderAcceptingDelivery =
+    req.user.role === ROLES.RIDER &&
+    requestedStatus === 'out_for_delivery' &&
+    ['confirmed', 'preparing', 'ready_for_delivery'].includes(order.status);
 
-  if (!allowed.includes(nextStatus)) {
-    throw badRequest(`Order cannot move from ${order.status} to ${nextStatus}.`);
+  if (!allowed.includes(requestedStatus) && !riderAcceptingDelivery) {
+    throw badRequest(`Order cannot move from ${order.status} to ${requestedStatus}.`);
   }
 
-  await query('UPDATE orders SET status = :status WHERE id = :id', { id, status: nextStatus });
+  if (requestedStatus === 'out_for_delivery' && !order.rider_id) {
+    throw badRequest('Assign an online rider before marking this order out for delivery.');
+  }
 
-  if (nextStatus === 'delivered') {
+  if (requestedStatus === 'out_for_delivery' && order.rider_current_status !== 'available') {
+    throw badRequest('The assigned rider must be online before this order can go out for delivery.');
+  }
+
+  // A rider marking delivered closes the order for the customer.
+  const finalStatus =
+    req.user.role === ROLES.RIDER && requestedStatus === 'delivered' ? 'completed' : requestedStatus;
+
+  await query('UPDATE orders SET status = :status WHERE id = :id', { id, status: finalStatus });
+
+  if (requestedStatus === 'delivered' || finalStatus === 'completed') {
     await query('UPDATE rider_profiles SET current_status = "available" WHERE id = :riderId', {
       riderId: order.rider_id
     });
   }
 
   const updated = await findOrderById(id);
+  const deliveredByRider = req.user.role === ROLES.RIDER && requestedStatus === 'delivered';
+  const notification = createOrderNotification(
+    deliveredByRider ? 'order_delivered' : 'order_status_updated',
+    updated,
+    deliveredByRider
+      ? `Order #${updated.id} has been delivered by ${updated.rider_name ?? 'the rider'} and is now complete.`
+      : `Order #${updated.id} is now ${orderStatusLabel(updated.status)}.`
+  );
+
+  emitStaffOrderNotification(req, notification);
+  emitCustomerOrderNotification(req, updated.customer_id, notification);
+  emitRiderOrderNotification(req, updated.rider_user_id, notification);
+  emitTrackedOrderNotification(req, updated.id, notification);
 
   res.json({ order: mapOrder(updated) });
 });
@@ -275,6 +364,10 @@ export const assignRider = asyncHandler(async (req, res) => {
     throw notFound('Order was not found.');
   }
 
+  if (['out_for_delivery', 'delivered', 'completed', 'cancelled'].includes(order.status)) {
+    throw badRequest('A rider can only be assigned before delivery starts.');
+  }
+
   const riders = await query(
     `SELECT rp.id, rp.current_status, u.is_active
      FROM rider_profiles rp
@@ -286,15 +379,33 @@ export const assignRider = asyncHandler(async (req, res) => {
   const rider = riders[0];
 
   if (!rider || !rider.is_active) {
-    throw badRequest('Selected rider is unavailable.');
+    throw badRequest('Selected rider does not exist or is inactive.');
   }
 
+  if (rider.current_status !== 'available') {
+    throw badRequest('Only online riders can be assigned to an order.');
+  }
+
+  // Attach the selected online rider to this order.
   await transaction(async (connection) => {
     await connection.execute('UPDATE orders SET rider_id = :riderId WHERE id = :id', { id, riderId });
-    await connection.execute('UPDATE rider_profiles SET current_status = "busy" WHERE id = :riderId', { riderId });
   });
 
   const updated = await findOrderById(id);
+  const notification = createOrderNotification(
+    'rider_assigned',
+    updated,
+    `Order #${updated.id} was assigned to ${updated.rider_name}.`
+  );
+
+  emitStaffOrderNotification(req, notification);
+  emitCustomerOrderNotification(req, updated.customer_id, notification);
+  emitTrackedOrderNotification(req, updated.id, notification);
+  emitRiderOrderNotification(
+    req,
+    updated.rider_user_id,
+    createOrderNotification('delivery_assigned', updated, `New delivery assigned: Order #${updated.id}.`)
+  );
 
   res.json({ order: mapOrder(updated) });
 });

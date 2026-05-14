@@ -2,6 +2,7 @@ import { query } from '../../config/db.js';
 import { ROLES } from '../../constants/roles.js';
 import { asyncHandler } from '../../utils/async-handler.js';
 import { badRequest, forbidden, notFound } from '../../utils/http-error.js';
+import { hashPassword } from '../../utils/passwords.js';
 
 function mapUser(row) {
   return {
@@ -45,6 +46,32 @@ export const listUsers = asyncHandler(async (req, res) => {
   );
 
   res.json({ users: rows.map(mapUser) });
+});
+
+export const createUser = asyncHandler(async (req, res) => {
+  const { name, email, phone, password, role } = req.validated.body;
+  const existing = await query('SELECT id FROM users WHERE email = :email LIMIT 1', { email });
+
+  if (existing[0]) {
+    throw badRequest('Email is already registered.');
+  }
+
+  const passwordHash = await hashPassword(password);
+  const result = await query(
+    `INSERT INTO users (name, email, phone, password_hash, role)
+     VALUES (:name, :email, :phone, :passwordHash, :role)`,
+    { name, email, phone, passwordHash, role }
+  );
+
+  const rows = await query(
+    `SELECT id, name, email, phone, role, is_active, created_at, updated_at
+     FROM users
+     WHERE id = :id
+     LIMIT 1`,
+    { id: result.insertId }
+  );
+
+  res.status(201).json({ user: mapUser(rows[0]) });
 });
 
 export const updateUserRole = asyncHandler(async (req, res) => {
